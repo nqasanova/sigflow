@@ -1,0 +1,23 @@
+# Runs the base station and a UE in separate containers on their own
+# network, so the traffic really goes over a (virtual) network interface
+# and the UE finds the base station by host name.
+#
+#   docker compose up --build --abort-on-container-exit --exit-code-from ue
+#
+# The command exits with the UE's exit code, 0 means the whole
+# attach, handover and detach sequence worked.
+
+services:
+  enb:
+    build: .
+    image: sigflow:local
+    command: ["sigflow-enb", "--port", "9500"]
+
+  ue:
+    image: sigflow:local
+    pull_policy: never  # built by the enb service above
+    depends_on:
+      - enb
+    # No wait-for script needed: if the base station is not up yet, the UE
+    # simply retries its attach request.
+    command: ["sigflow-ue", "--host", "enb", "--port", "9500", "--reports", "8"]

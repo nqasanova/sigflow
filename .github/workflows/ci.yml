@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes older runs pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format
+        run: |
+          find include src apps tests/unit -name '*.[ch]pp' -print0 \
+            | xargs -0 clang-format-18 --dry-run --Werror
+      - name: Validate schemas
+        run: PYTHONPATH=tools/msgc python3 -m msgc --check schemas/*.msg
+      - name: Generator unit tests
+        run: PYTHONPATH=tools/msgc python3 -m unittest discover -s tools/msgc/tests -t tools/msgc -v
+
+  build:
+    needs: lint
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc, cc: gcc-13, cxx: g++-13, preset: ci }
+          - { name: clang, cc: clang-18, cxx: clang++-18, preset: ci }
+          - { name: gcc-asan, cc: gcc-13, cxx: g++-13, preset: asan }
+    name: build (${{ matrix.name }})
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ccache
+
+      # Restores the compiler cache from earlier runs. The key includes the
+      # job name so gcc, clang and sanitizer builds do not evict each other.
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.name }}
+          max-size: 500M
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: ccache statistics
+        run: ccache --show-stats
+
+  docker-system-test:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Base station and UE in separate containers
+        run: docker compose up --build --abort-on-container-exit --exit-code-from ue
+      - name: Logs
+        if: always()
+        run: docker compose logs

@@ -1,0 +1,71 @@
+# Same pipeline as .github/workflows/ci.yml, for GitLab runners.
+
+stages:
+  - lint
+  - build
+  - system
+
+variables:
+  CCACHE_DIR: "$CI_PROJECT_DIR/.ccache"
+  CCACHE_MAXSIZE: "500M"
+  DEBIAN_FRONTEND: noninteractive
+
+.toolchain:
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends g++ clang clang-format cmake ninja-build ccache python3 git ca-certificates
+
+lint:
+  extends: .toolchain
+  stage: lint
+  script:
+    - find include src apps tests/unit -name '*.[ch]pp' -print0 | xargs -0 clang-format --dry-run --Werror
+    - PYTHONPATH=tools/msgc python3 -m msgc --check schemas/*.msg
+    - PYTHONPATH=tools/msgc python3 -m unittest discover -s tools/msgc/tests -t tools/msgc -v
+
+build:
+  extends: .toolchain
+  stage: build
+  parallel:
+    matrix:
+      - COMPILER: gcc
+        CC: gcc
+        CXX: g++
+        PRESET: ci
+      - COMPILER: clang
+        CC: clang
+        CXX: clang++
+        PRESET: ci
+      - COMPILER: gcc-asan
+        CC: gcc
+        CXX: g++
+        PRESET: asan
+  # One cache per compiler and preset. Objects from different compilers
+  # never match anyway, sharing would only waste space.
+  cache:
+    key: "ccache-$COMPILER"
+    paths:
+      - .ccache/
+  script:
+    - ccache --zero-stats
+    - cmake --preset "$PRESET" -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    - cmake --build --preset "$PRESET"
+    - ctest --preset "$PRESET" --output-junit "$CI_PROJECT_DIR/junit-$COMPILER.xml"
+    - ccache --show-stats
+  artifacts:
+    when: always
+    reports:
+      junit: junit-$COMPILER.xml
+
+docker-system-test:
+  stage: system
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker compose up --build --abort-on-container-exit --exit-code-from ue
+  after_script:
+    - docker compose logs
